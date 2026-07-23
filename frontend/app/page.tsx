@@ -376,11 +376,8 @@ export default function Home() {
       <div className="flex min-w-0 flex-[1.2] flex-col border-r">
         <header className="flex items-baseline gap-3 px-6 py-3.5">
           <h1 className="text-sm font-semibold tracking-tight">
-            Long-Term Memory Retrieval using Zettelkasten
+            long-term memory retrieval using zettelkasten
           </h1>
-          <span className="font-mono text-[11px] text-muted-foreground">
-            sonnet 5 + haiku · sqlite
-          </span>
           <span className="ml-auto flex gap-3 text-[11px]">
             <a
               href="https://arxiv.org/abs/2502.12110"
@@ -404,14 +401,14 @@ export default function Home() {
         <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-5">
           {messages.length === 0 && (
             <p className="m-auto max-w-xs text-center text-sm text-muted-foreground">
-              Say anything. Facts worth keeping become linked notes in a local SQLite memory.
+              say anything. facts worth keeping become linked notes in a local sqlite memory.
             </p>
           )}
           {messages.map((m, i) => (
             <div
               key={i}
               className={cn(
-                "max-w-[82%] rounded-2xl px-4 py-2 text-sm",
+                "max-w-[82%] rounded-2xl px-4 py-1.5 text-sm",
                 m.role === "user"
                   ? "self-end whitespace-pre-wrap rounded-br-md bg-[#007AFF] text-white"
                   : "self-start rounded-bl-md border bg-white text-black",
@@ -419,7 +416,7 @@ export default function Home() {
               )}
             >
               {m.role === "assistant" ? (
-                <div className="prose prose-sm prose-neutral max-w-none prose-headings:tracking-tight prose-p:my-1.5 prose-pre:my-2 prose-pre:rounded-md prose-pre:bg-muted prose-pre:text-foreground prose-code:font-mono prose-code:text-[12px] prose-code:before:content-none prose-code:after:content-none prose-ul:my-1.5 prose-li:my-0">
+                <div className="prose prose-sm prose-neutral max-w-none prose-headings:tracking-tight prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-pre:my-2 prose-pre:rounded-md prose-pre:bg-muted prose-pre:text-foreground prose-code:font-mono prose-code:text-[12px] prose-code:before:content-none prose-code:after:content-none prose-ul:my-1.5 prose-li:my-0">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                 </div>
               ) : (
@@ -435,11 +432,11 @@ export default function Home() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Say anything…"
+            placeholder="say anything…"
             disabled={busy}
           />
           <Button onClick={send} disabled={busy || !input.trim()}>
-            Send
+            send
           </Button>
         </div>
       </div>
@@ -450,13 +447,13 @@ export default function Home() {
           <div className="px-4 py-2">
             <TabsList className="h-8">
               <TabsTrigger value="timeline" className="text-xs">
-                Timeline
+                timeline
               </TabsTrigger>
               <TabsTrigger value="memories" className="text-xs" onClick={refreshMemories}>
-                Memories ({mem.notes.length})
+                memories ({mem.notes.length})
               </TabsTrigger>
               <TabsTrigger value="graph" className="text-xs" onClick={refreshMemories}>
-                Graph
+                graph
               </TabsTrigger>
             </TabsList>
           </div>

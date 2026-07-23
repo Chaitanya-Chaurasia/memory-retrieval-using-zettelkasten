@@ -4,7 +4,7 @@ import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 
-export const metadata: Metadata = { title: "Long-Term Memory Retrieval using Zettelkasten" };
+export const metadata: Metadata = { title: "long-term memory retrieval using zettelkasten" };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (

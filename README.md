@@ -1,33 +1,69 @@
-# Long-Term Memory Retrieval using Zettelkasten
+# long-term memory retrieval using zettelkasten
 
-Personal AI chat with **A-MEM agentic memory** ([arXiv 2502.12110](https://arxiv.org/abs/2502.12110)) — a Zettelkasten-style long-term memory in local SQLite, with the backend's full thinking process streamed live to the UI.
+a chat app that actually remembers you. everything you tell it gets distilled into small
+linked notes in a local sqlite file, and the whole thought process (search math, model
+reasoning, write decisions) streams to the ui as it happens.
 
-## How it works
+**byok** (bring your own anthropic key).
 
-Every turn runs three visible stages, streamed as SSE events:
+## the idea
 
-1. **Retrieval** — the user message is embedded locally (`all-MiniLM-L6-v2`) and searched against the note store with hybrid retrieval: `sqlite-vec` KNN + SQLite FTS5 BM25, merged with Reciprocal Rank Fusion.
-2. **Answering** — Claude (`claude-sonnet-5`, adaptive thinking; the memory pipeline runs on `claude-haiku-4-5`) answers with retrieved memories in the system prompt. Its thinking summary and answer tokens stream live.
-3. **Memorizing (A-MEM)** — memorable facts are extracted from the exchange; each becomes a *note* (LLM-generated keywords, tags, context), gets linked to its nearest existing notes, and may trigger *memory evolution* — retroactively rewriting an old note's context when the new one changes its meaning.
+llms forget everything between conversations. the usual fix is rag over raw chat logs,
+which works badly: transcript chunks mix noise with signal, stored text never gets
+updated when you contradict yourself, and related facts sit around as disconnected
+islands.
 
-## Run
+this project glues together two papers that attack that from different angles:
 
-Backend (needs `ANTHROPIC_API_KEY` in the environment):
+- [a-mem](https://arxiv.org/abs/2502.12110) treats memory like a zettelkasten. each fact
+  becomes a note with llm-written keywords, tags, and a context sentence. new notes get
+  linked to old ones the model thinks are genuinely related, and a new note can trigger
+  "evolution": rewriting an older note whose meaning just changed.
+- [mem0](https://arxiv.org/abs/2504.19413) is about write hygiene. before storing
+  anything, compare it against what you already know and decide: add, update, or noop.
+  without this you end up with five copies of "my name is chai" (ask me how i know).
+
+mem0 keeps the store clean, a-mem keeps it structured. the fusion is a write gate in
+front of a note graph.
+
+## what happens per message
+
+1. **retrieval.** your message is embedded locally (all-minilm-l6-v2, 384 dims, no api
+   call) and searched two ways in one sqlite file: knn over sqlite-vec, and bm25 over
+   fts5. the two rankings get merged with reciprocal rank fusion, score = sum of
+   1/(60+rank). embeddings catch paraphrase ("my dog" finds rex), bm25 catches exact
+   names that embeddings blur. top 6 notes go into the system prompt.
+2. **answer.** claude sonnet 5 replies with those memories in context. its thinking
+   stream and the answer tokens go straight to the timeline.
+3. **memorize.** haiku pulls durable facts out of the exchange. each fact hits the mem0
+   gate first. if it survives as an "add", it becomes a note, gets compared to its 5
+   nearest neighbors, and the model decides which links are real and whether any old
+   note needs rewriting. every decision, including the rejected links, shows up in the
+   timeline with a reason.
+
+the llm never scans the whole store. embeddings propose candidates, the model judges
+them. per-turn cost stays flat no matter how many notes you have.
+
+## storage
+
+one sqlite file, four tables: notes (the graph nodes), links (edges with the model's
+reason attached), a vec0 virtual table for vectors, an fts5 table for keyword search.
+no vector db, no graph db. delete `backend/memory.db` to wipe your assistant's brain.
+
+## running it
+
+put your anthropic api key in `backend/.env`, then:
 
 ```sh
-cd backend
-# NOTE: must be a Python whose sqlite3 supports loadable extensions
-# (Homebrew python works; the python.org/Xcode build does not)
-/opt/homebrew/bin/python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python main.py          # http://localhost:8000
+./run.sh
 ```
 
-Frontend:
+that's it. first run installs everything (the embedding model plus pytorch, so give it
+a few minutes), then it starts the backend on :8000 and the ui on :3000. ctrl-c kills
+both.
 
-```sh
-cd frontend
-npm install
-npm run dev                       # http://localhost:3000
-```
+you need a python whose sqlite3 can load extensions. homebrew python works, the one
+xcode ships does not. the script defaults to `/opt/homebrew/bin/python3.13`, override
+with `PY=/path/to/python ./run.sh`.
 
-First backend start downloads the ~90MB embedding model. Memory lives in `backend/memory.db` — delete it to wipe.
+chat runs on sonnet 5, the memory pipeline on haiku, so a turn costs a cent or two.
