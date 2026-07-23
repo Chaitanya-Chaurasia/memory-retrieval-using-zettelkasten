@@ -92,24 +92,27 @@ class MemoryStore:
         self.db.commit()
         return note_id
 
-    def evolve_note(self, note_id: int, context: str | None = None, tags: list[str] | None = None):
-        """A-MEM memory evolution: retroactively update an old note's metadata."""
+    def evolve_note(self, note_id: int, content: str | None = None,
+                    context: str | None = None, tags: list[str] | None = None):
+        """A-MEM memory evolution / Mem0-style UPDATE: rewrite a note in place
+        and re-sync its FTS and vector representations."""
         note = self.get_note(note_id)
         if note is None:
             return
+        new_content = content if content is not None else note["content"]
         new_context = context if context is not None else note["context"]
         new_tags = json.dumps(tags) if tags is not None else note["tags"]
         self.db.execute(
-            "UPDATE notes SET context = ?, tags = ?, updated_at = ? WHERE id = ?",
-            (new_context, new_tags, time.time(), note_id),
+            "UPDATE notes SET content = ?, context = ?, tags = ?, updated_at = ? WHERE id = ?",
+            (new_content, new_context, new_tags, time.time(), note_id),
         )
         keywords = json.loads(note["keywords"])
         self.db.execute("DELETE FROM notes_fts WHERE rowid = ?", (note_id,))
         self.db.execute(
             "INSERT INTO notes_fts (rowid, content, context, keywords) VALUES (?, ?, ?, ?)",
-            (note_id, note["content"], new_context, " ".join(keywords)),
+            (note_id, new_content, new_context, " ".join(keywords)),
         )
-        vec = embed(self._note_text(note["content"], new_context, keywords))
+        vec = embed(self._note_text(new_content, new_context, keywords))
         self.db.execute("DELETE FROM notes_vec WHERE rowid = ?", (note_id,))
         self.db.execute(
             "INSERT INTO notes_vec (rowid, embedding) VALUES (?, ?)",
@@ -160,6 +163,63 @@ class MemoryStore:
         except sqlite3.OperationalError:
             return []
         return [(r["rowid"], r["score"]) for r in rows]
+
+    def hybrid_search_traced(self, query: str, k: int = 6) -> tuple[list[dict], dict]:
+        """Like hybrid_search, but also returns the full computation trace:
+        raw ranker outputs and the per-note RRF arithmetic."""
+        t0 = time.perf_counter()
+        vec_hits = self.vector_search(query, k=k * 2)
+        vec_ms = (time.perf_counter() - t0) * 1000
+        t0 = time.perf_counter()
+        bm25_hits = self.bm25_search(query, k=k * 2)
+        bm25_ms = (time.perf_counter() - t0) * 1000
+
+        def snippet(rid):
+            n = self.get_note(rid)
+            return (n["content"][:80] if n else "?")
+
+        vec_rank = {rid: r for r, (rid, _) in enumerate(vec_hits)}
+        bm25_rank = {rid: r for r, (rid, _) in enumerate(bm25_hits)}
+        fusion = []
+        for rid in set(vec_rank) | set(bm25_rank):
+            vc = 1.0 / (60 + vec_rank[rid] + 1) if rid in vec_rank else 0.0
+            bc = 1.0 / (60 + bm25_rank[rid] + 1) if rid in bm25_rank else 0.0
+            fusion.append({
+                "id": rid,
+                "snippet": snippet(rid),
+                "vec_rank": vec_rank.get(rid),
+                "bm25_rank": bm25_rank.get(rid),
+                "vec_contrib": round(vc, 5),
+                "bm25_contrib": round(bc, 5),
+                "total": round(vc + bc, 5),
+            })
+        fusion.sort(key=lambda r: -r["total"])
+        for i, row in enumerate(fusion):
+            row["selected"] = i < k
+
+        trace = {
+            "vector": {
+                "ms": round(vec_ms, 1),
+                "hits": [{"id": rid, "snippet": snippet(rid), "distance": round(d, 4)}
+                         for rid, d in vec_hits],
+            },
+            "bm25": {
+                "ms": round(bm25_ms, 1),
+                "hits": [{"id": rid, "snippet": snippet(rid), "score": round(s, 3)}
+                         for rid, s in bm25_hits],
+            },
+            "fusion": fusion,
+        }
+        results = []
+        for row in fusion:
+            if not row["selected"]:
+                continue
+            note = self.get_note(row["id"])
+            if note:
+                sources = (["vector"] if row["vec_rank"] is not None else []) + \
+                          (["bm25"] if row["bm25_rank"] is not None else [])
+                results.append({**self.note_dict(note), "score": row["total"], "sources": sources})
+        return results, trace
 
     def hybrid_search(self, query: str, k: int = 6) -> list[dict]:
         """Reciprocal Rank Fusion of vector and BM25 rankings (k=60 constant)."""

@@ -1,4 +1,4 @@
-# amem-chat
+# Long-Term Memory Retrieval using Zettelkasten
 
 Personal AI chat with **A-MEM agentic memory** ([arXiv 2502.12110](https://arxiv.org/abs/2502.12110)) — a Zettelkasten-style long-term memory in local SQLite, with the backend's full thinking process streamed live to the UI.
 
@@ -7,7 +7,7 @@ Personal AI chat with **A-MEM agentic memory** ([arXiv 2502.12110](https://arxiv
 Every turn runs three visible stages, streamed as SSE events:
 
 1. **Retrieval** — the user message is embedded locally (`all-MiniLM-L6-v2`) and searched against the note store with hybrid retrieval: `sqlite-vec` KNN + SQLite FTS5 BM25, merged with Reciprocal Rank Fusion.
-2. **Answering** — Claude (`claude-opus-4-8`, adaptive thinking) answers with retrieved memories in the system prompt. Its thinking summary and answer tokens stream live.
+2. **Answering** — Claude (`claude-sonnet-5`, adaptive thinking; the memory pipeline runs on `claude-haiku-4-5`) answers with retrieved memories in the system prompt. Its thinking summary and answer tokens stream live.
 3. **Memorizing (A-MEM)** — memorable facts are extracted from the exchange; each becomes a *note* (LLM-generated keywords, tags, context), gets linked to its nearest existing notes, and may trigger *memory evolution* — retroactively rewriting an old note's context when the new one changes its meaning.
 
 ## Run

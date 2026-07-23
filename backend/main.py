@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import agent
 from memory import MemoryStore
 
-app = FastAPI(title="amem-chat")
+app = FastAPI(title="Long-Term Memory Retrieval using Zettelkasten")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -41,7 +41,12 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     # --- 1. memory retrieval ---
     yield sse({"type": "stage", "name": "retrieval"})
     yield sse({"type": "memory_search", "query": user_msg, "method": "hybrid (vector + BM25, RRF)"})
-    memories = store.hybrid_search(user_msg, k=6)
+    yield sse({"type": "embed", "model": "all-MiniLM-L6-v2", "dims": 384})
+    memories, trace = store.hybrid_search_traced(user_msg, k=6)
+    yield sse({"type": "ranker_results", "ranker": "vector", **trace["vector"]})
+    yield sse({"type": "ranker_results", "ranker": "bm25", **trace["bm25"]})
+    if trace["fusion"]:
+        yield sse({"type": "rrf_table", "rows": trace["fusion"]})
     store.touch([m["id"] for m in memories])
     for m in memories:
         yield sse({
@@ -66,6 +71,7 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
 
     # --- 3. A-MEM write pipeline ---
     yield sse({"type": "stage", "name": "memorizing"})
+    yield sse({"type": "extracting_facts", "model": agent.MEMORY_MODEL})
     try:
         facts = agent.extract_facts(user_msg, answer)
     except Exception as e:
@@ -76,6 +82,22 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     for fact in facts:
         yield sse({"type": "fact_extracted", "fact": fact})
         try:
+            # Mem0-style write gate: dedupe/merge before creating anything
+            candidates = store.hybrid_search(fact, k=4)
+            decision = agent.decide_write(fact, candidates)
+            yield sse({"type": "write_decision", "action": decision.action,
+                       "target": decision.target_note_id, "reason": decision.reason})
+            if decision.action == "noop":
+                if decision.target_note_id:
+                    store.touch([decision.target_note_id])
+                continue
+            if decision.action == "update" and decision.target_note_id:
+                new_content = decision.merged_content or fact
+                store.evolve_note(decision.target_note_id, content=new_content)
+                updated = store.note_dict(store.get_note(decision.target_note_id))
+                yield sse({"type": "note_updated", "note": updated})
+                continue
+
             draft = agent.construct_note(fact)
             note_id = store.add_note(fact, draft.context, draft.keywords, draft.tags)
             note = store.note_dict(store.get_note(note_id))
@@ -84,13 +106,14 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
             nbrs = store.neighbors(note_id, k=5)
             if nbrs:
                 yield sse({"type": "evolution_check", "note_id": note_id,
-                           "neighbor_ids": [n["id"] for n in nbrs]})
+                           "neighbors": [{"id": n["id"], "snippet": n["content"][:80],
+                                          "distance": n["distance"]} for n in nbrs]})
                 evo = agent.decide_links_and_evolution(note, nbrs)
                 for link in evo.links:
                     if link.should_link:
                         store.link(note_id, link.note_id, link.reason)
-                        yield sse({"type": "link_created", "a": note_id, "b": link.note_id,
-                                   "reason": link.reason})
+                    yield sse({"type": "link_decision", "a": note_id, "b": link.note_id,
+                               "linked": link.should_link, "reason": link.reason})
                 if evo.evolve_note_id is not None and evo.evolved_context:
                     store.evolve_note(evo.evolve_note_id, context=evo.evolved_context,
                                       tags=evo.evolved_tags)

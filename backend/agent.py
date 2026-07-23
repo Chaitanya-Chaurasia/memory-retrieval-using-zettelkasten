@@ -1,12 +1,15 @@
 """LLM layer: chat streaming plus the A-MEM note pipeline (construct, link, evolve)."""
 
 import json
-from typing import Iterator
+from typing import Iterator, Literal
 
 import anthropic
 from pydantic import BaseModel
 
-MODEL = "claude-opus-4-8"
+# Chat gets the stronger model; the memory pipeline (extraction, note
+# construction, link/evolution judgment) runs on Haiku for cost.
+CHAT_MODEL = "claude-sonnet-5"
+MEMORY_MODEL = "claude-haiku-4-5"
 
 client = anthropic.Anthropic()
 
@@ -29,6 +32,13 @@ class LinkDecision(BaseModel):
     reason: str
 
 
+class WriteDecision(BaseModel):
+    action: Literal["add", "update", "noop"]
+    target_note_id: int | None = None
+    merged_content: str | None = None
+    reason: str
+
+
 class Evolution(BaseModel):
     links: list[LinkDecision]
     evolved_context: str | None = None
@@ -42,6 +52,21 @@ CHAT_SYSTEM = """You are a personal assistant with a long-term memory.
 Relevant memories retrieved for this turn are provided below. Use them naturally when
 they help; never claim to remember something that is not in the memories or the
 conversation. If memories conflict, prefer the most recently updated one.
+
+<style>
+Write like a person, not a chatbot (rules adapted from github.com/blader/humanizer):
+- No emojis. Ever.
+- No em dashes; use periods, commas, colons, or parentheses instead.
+- Plain verbs: "is" and "has", not "serves as", "features", "boasts".
+- No AI vocabulary: additionally, testament, landscape, showcasing, delve, crucial.
+- No negative parallelisms ("it's not just X, it's Y") and no forced rule-of-three lists.
+- No signposting ("Let's dive in") or chatbot closers ("I hope this helps!", "Let me know if...").
+- No sycophancy; answer directly without praising the question.
+- Cut filler: "in order to" becomes "to", "due to the fact that" becomes "because".
+- Hedge at most once per claim; no "could potentially possibly".
+- Keep formatting minimal: no bold-stuffed lists or headers unless genuinely needed.
+- Match length to the question; short questions get short answers.
+</style>
 
 <memories>
 {memories}
@@ -60,7 +85,7 @@ def format_memories(memories: list[dict]) -> str:
 def chat_stream(messages: list[dict], memories: list[dict]) -> Iterator[dict]:
     """Yields {"type": "thinking_delta"|"token_delta", "text": ...} events."""
     with client.messages.stream(
-        model=MODEL,
+        model=CHAT_MODEL,
         max_tokens=4096,
         thinking={"type": "adaptive", "display": "summarized"},
         system=CHAT_SYSTEM.format(memories=format_memories(memories)),
@@ -79,7 +104,7 @@ def chat_stream(messages: list[dict], memories: list[dict]) -> Iterator[dict]:
 def extract_facts(user_msg: str, assistant_msg: str) -> list[str]:
     """Pull memorable, atomic facts about the user out of the latest exchange."""
     resp = client.messages.parse(
-        model=MODEL,
+        model=MEMORY_MODEL,
         max_tokens=1024,
         output_format=ExtractedFacts,
         messages=[{
@@ -97,10 +122,42 @@ def extract_facts(user_msg: str, assistant_msg: str) -> list[str]:
     return resp.parsed_output.facts if resp.parsed_output else []
 
 
+def decide_write(fact: str, candidates: list[dict]) -> WriteDecision:
+    """Mem0-style write gate (arXiv 2504.19413): before storing a fact, compare it
+    to the most similar existing notes and choose add / update / noop."""
+    if not candidates:
+        return WriteDecision(action="add", reason="no similar notes exist")
+    candidate_text = "\n".join(
+        f"- note_id={c['id']}: {c['content']} (context: {c['context']})" for c in candidates
+    )
+    resp = client.messages.parse(
+        model=MEMORY_MODEL,
+        max_tokens=512,
+        output_format=WriteDecision,
+        messages=[{
+            "role": "user",
+            "content": (
+                "You manage a memory store. A new candidate fact was extracted:\n\n"
+                f"CANDIDATE: {fact}\n\n"
+                f"Most similar existing notes:\n{candidate_text}\n\n"
+                "Decide one action:\n"
+                "- noop: an existing note already says this (same information, even if "
+                "worded differently). Set target_note_id to that note.\n"
+                "- update: the candidate refines, corrects, or supersedes ONE existing note. "
+                "Set target_note_id and merged_content (a single sentence combining the best "
+                "of both — for corrections, state the corrected fact).\n"
+                "- add: genuinely new information not covered by any existing note.\n"
+                "Give a short reason."
+            ),
+        }],
+    )
+    return resp.parsed_output or WriteDecision(action="add", reason="decision failed; defaulting to add")
+
+
 def construct_note(fact: str) -> NoteDraft:
     """A-MEM note construction: LLM generates keywords, tags, and a context sentence."""
     resp = client.messages.parse(
-        model=MODEL,
+        model=MEMORY_MODEL,
         max_tokens=512,
         output_format=NoteDraft,
         messages=[{
@@ -126,7 +183,7 @@ def decide_links_and_evolution(note: dict, neighbors: list[dict]) -> Evolution:
         for n in neighbors
     )
     resp = client.messages.parse(
-        model=MODEL,
+        model=MEMORY_MODEL,
         max_tokens=1024,
         output_format=Evolution,
         messages=[{
