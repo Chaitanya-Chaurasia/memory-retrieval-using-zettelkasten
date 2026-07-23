@@ -1,21 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { MemoryGraph } from "@/components/memory-graph";
+import type { ChatMessage, MemoryDump, SSEEvent } from "@/lib/types";
 
 const API = "http://localhost:8000";
 
-const STAGE_LABELS = {
+const STAGE_LABELS: Record<string, string> = {
   retrieval: "1 · memory retrieval",
   answering: "2 · answering",
   memorizing: "3 · memorizing",
 };
 
-function Label({ children, className }) {
+function Label({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <span
       className={cn(
@@ -28,7 +32,15 @@ function Label({ children, className }) {
   );
 }
 
-function Ev({ children, className, strong }) {
+function Ev({
+  children,
+  className,
+  strong,
+}: {
+  children: ReactNode;
+  className?: string;
+  strong?: boolean;
+}) {
   return (
     <div
       className={cn(
@@ -42,7 +54,71 @@ function Ev({ children, className, strong }) {
   );
 }
 
-function TimelineEvent({ ev }) {
+function Bar({ frac }: { frac: number }) {
+  return (
+    <span className="inline-block h-[6px] w-16 rounded-sm bg-muted align-middle">
+      <span
+        className="block h-full rounded-sm bg-foreground"
+        style={{ width: `${Math.max(2, Math.min(100, frac * 100))}%` }}
+      />
+    </span>
+  );
+}
+
+function RankerResults({ ev }: { ev: SSEEvent }) {
+  const isVec = ev.ranker === "vector";
+  const hits: SSEEvent[] = ev.hits ?? [];
+  const mag = (h: SSEEvent) => (isVec ? Math.max(0, (2 - h.distance) / 2) : Math.abs(h.score));
+  const max = Math.max(...hits.map(mag), 1e-9);
+  return (
+    <Ev>
+      <Label>
+        {isVec ? "vector knn (cosine)" : "bm25 (fts5)"} · {hits.length} hits · {ev.ms}ms
+      </Label>
+      {hits.length === 0 && <div className="font-mono text-[11px]">no matches</div>}
+      {hits.map((h, i) => (
+        <div key={h.id} className="flex items-center gap-2 font-mono text-[11px]">
+          <span className="w-8 text-right">#{i + 1}</span>
+          <Bar frac={mag(h) / max} />
+          <span className="w-14 shrink-0">
+            {isVec ? `d=${h.distance}` : `s=${h.score}`}
+          </span>
+          <span className="truncate text-foreground">n{h.id} · {h.snippet}</span>
+        </div>
+      ))}
+    </Ev>
+  );
+}
+
+function RrfTable({ rows = [] }: { rows?: SSEEvent[] }) {
+  const max = Math.max(...rows.map((r) => r.total), 1e-9);
+  return (
+    <Ev strong>
+      <Label>rrf fusion · score = Σ 1/(60+rank)</Label>
+      {rows.map((r) => (
+        <div
+          key={r.id}
+          className={cn(
+            "flex items-center gap-2 font-mono text-[11px]",
+            !r.selected && "opacity-40"
+          )}
+        >
+          <span className="w-8 shrink-0 text-right">n{r.id}</span>
+          <Bar frac={r.total / max} />
+          <span className="w-40 shrink-0">
+            {r.vec_contrib > 0 ? `vec@${r.vec_rank + 1}=${r.vec_contrib}` : "vec —"}
+            {" + "}
+            {r.bm25_contrib > 0 ? `bm25@${r.bm25_rank + 1}=${r.bm25_contrib}` : "bm25 —"}
+          </span>
+          <span className="w-16 shrink-0 text-foreground">= {r.total}</span>
+          <span className="truncate">{r.selected ? r.snippet : "cut"}</span>
+        </div>
+      ))}
+    </Ev>
+  );
+}
+
+function TimelineEvent({ ev }: { ev: SSEEvent }) {
   switch (ev.type) {
     case "stage":
       return (
@@ -61,7 +137,7 @@ function TimelineEvent({ ev }) {
       return (
         <Ev strong>
           <Label>
-            hit · note {ev.id} · rrf {ev.score} · {ev.sources.join("+")}
+            hit · note {ev.id} · rrf {ev.score} · {(ev.sources ?? []).join("+")}
           </Label>
           <span className="font-medium text-foreground">{ev.content}</span>
           <div>{ev.context}</div>
@@ -73,11 +149,52 @@ function TimelineEvent({ ev }) {
           <Label>no memories matched</Label>
         </Ev>
       );
+    case "embed":
+      return (
+        <Ev>
+          <Label>embed</Label>
+          <span className="font-mono text-[11px]">
+            query &rarr; {ev.model} &rarr; float32[{ev.dims}]
+          </span>
+        </Ev>
+      );
+    case "ranker_results":
+      return <RankerResults ev={ev} />;
+    case "rrf_table":
+      return <RrfTable rows={ev.rows} />;
+    case "extracting_facts":
+      return (
+        <Ev>
+          <Label>extracting facts · {ev.model}</Label>
+          scanning the exchange for durable facts about you
+        </Ev>
+      );
     case "fact_extracted":
       return (
         <Ev>
           <Label>fact extracted</Label>
           {ev.fact}
+        </Ev>
+      );
+    case "write_decision":
+      return (
+        <Ev
+          strong={ev.action !== "noop"}
+          className={ev.action === "noop" ? "opacity-50" : undefined}
+        >
+          <Label>
+            {ev.action === "noop" && `noop · already known${ev.target ? ` (note ${ev.target})` : ""}`}
+            {ev.action === "update" && `update · merging into note ${ev.target}`}
+            {ev.action === "add" && "add · new information"}
+          </Label>
+          {ev.reason}
+        </Ev>
+      );
+    case "note_updated":
+      return (
+        <Ev strong>
+          <Label>note {ev.note.id} rewritten</Label>
+          <span className="font-medium text-foreground">{ev.note.content}</span>
         </Ev>
       );
     case "no_facts":
@@ -93,12 +210,12 @@ function TimelineEvent({ ev }) {
           <span className="font-medium text-foreground">{ev.note.content}</span>
           <div>{ev.note.context}</div>
           <div className="mt-1.5 flex flex-wrap gap-1">
-            {ev.note.tags.map((t) => (
+            {(ev.note.tags ?? []).map((t: string) => (
               <Badge key={t} variant="outline" className="font-mono text-[10px] font-normal">
                 #{t}
               </Badge>
             ))}
-            {ev.note.keywords.map((k) => (
+            {(ev.note.keywords ?? []).map((k: string) => (
               <Badge key={k} variant="secondary" className="font-mono text-[10px] font-normal">
                 {k}
               </Badge>
@@ -106,18 +223,28 @@ function TimelineEvent({ ev }) {
           </div>
         </Ev>
       );
-    case "evolution_check":
+    case "evolution_check": {
+      const neighbors: SSEEvent[] = ev.neighbors ?? [];
+      const max = Math.max(...neighbors.map((n) => 2 - n.distance), 1e-9);
       return (
         <Ev>
-          <Label>checking neighbors</Label>
-          note {ev.note_id} vs [{ev.neighbor_ids.join(", ")}]
+          <Label>nearest neighbors of note {ev.note_id}</Label>
+          {neighbors.map((n) => (
+            <div key={n.id} className="flex items-center gap-2 font-mono text-[11px]">
+              <span className="w-8 shrink-0 text-right">n{n.id}</span>
+              <Bar frac={Math.max(0, 2 - n.distance) / max} />
+              <span className="w-16 shrink-0">d={n.distance}</span>
+              <span className="truncate">{n.snippet}</span>
+            </div>
+          ))}
         </Ev>
       );
-    case "link_created":
+    }
+    case "link_decision":
       return (
-        <Ev strong>
+        <Ev strong={ev.linked} className={!ev.linked ? "opacity-50" : undefined}>
           <Label>
-            link {ev.a} &harr; {ev.b}
+            {ev.linked ? `link ${ev.a} ↔ ${ev.b}` : `no link ${ev.a} · ${ev.b}`}
           </Label>
           {ev.reason}
         </Ev>
@@ -141,7 +268,7 @@ function TimelineEvent({ ev }) {
   }
 }
 
-function ThinkingBlock({ text, live }) {
+function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   if (!text) return null;
   return (
     <Ev className="whitespace-pre-wrap font-mono text-[12px]">
@@ -152,13 +279,13 @@ function ThinkingBlock({ text, live }) {
 }
 
 export default function Home() {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [events, setEvents] = useState([]);
-  const [mem, setMem] = useState({ notes: [], links: [] });
-  const chatEnd = useRef(null);
-  const tlEnd = useRef(null);
+  const [events, setEvents] = useState<SSEEvent[]>([]);
+  const [mem, setMem] = useState<MemoryDump>({ notes: [], links: [] });
+  const chatEnd = useRef<HTMLDivElement>(null);
+  const tlEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -183,7 +310,7 @@ export default function Home() {
     setInput("");
     setBusy(true);
     setEvents([]);
-    const history = [...messages, { role: "user", content: text }];
+    const history: ChatMessage[] = [...messages, { role: "user", content: text }];
     setMessages([...history, { role: "assistant", content: "", streaming: true }]);
 
     try {
@@ -194,11 +321,11 @@ export default function Home() {
           messages: history.map(({ role, content }) => ({ role, content })),
         }),
       });
-      const reader = res.body.getReader();
+      const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buf = "";
 
-      const handle = (ev) => {
+      const handle = (ev: SSEEvent) => {
         if (ev.type === "token_delta") {
           setMessages((ms) => {
             const copy = [...ms];
@@ -229,7 +356,7 @@ export default function Home() {
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const parts = buf.split("\n\n");
-        buf = parts.pop();
+        buf = parts.pop() ?? "";
         for (const part of parts) {
           const line = part.trim();
           if (line.startsWith("data: ")) handle(JSON.parse(line.slice(6)));
@@ -247,10 +374,30 @@ export default function Home() {
     <div className="flex h-screen">
       {/* chat */}
       <div className="flex min-w-0 flex-[1.2] flex-col border-r">
-        <header className="flex items-baseline gap-3 border-b px-6 py-3.5">
-          <h1 className="text-sm font-semibold tracking-tight">amem</h1>
+        <header className="flex items-baseline gap-3 px-6 py-3.5">
+          <h1 className="text-sm font-semibold tracking-tight">
+            Long-Term Memory Retrieval using Zettelkasten
+          </h1>
           <span className="font-mono text-[11px] text-muted-foreground">
-            a-mem · opus 4.8 · sqlite
+            sonnet 5 + haiku · sqlite
+          </span>
+          <span className="ml-auto flex gap-3 text-[11px]">
+            <a
+              href="https://arxiv.org/abs/2502.12110"
+              target="_blank"
+              rel="noreferrer"
+              className="text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            >
+              a-mem paper
+            </a>
+            <a
+              href="https://arxiv.org/abs/2504.19413"
+              target="_blank"
+              rel="noreferrer"
+              className="text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            >
+              mem0 paper
+            </a>
           </span>
         </header>
 
@@ -264,14 +411,20 @@ export default function Home() {
             <div
               key={i}
               className={cn(
-                "max-w-[82%] whitespace-pre-wrap rounded-lg px-3.5 py-2 text-sm",
+                "max-w-[82%] rounded-2xl px-4 py-2 text-sm",
                 m.role === "user"
-                  ? "self-end bg-foreground text-background"
-                  : "self-start border bg-background",
+                  ? "self-end whitespace-pre-wrap rounded-br-md bg-[#007AFF] text-white"
+                  : "self-start rounded-bl-md border bg-white text-black",
                 m.streaming && busy && "caret"
               )}
             >
-              {m.content}
+              {m.role === "assistant" ? (
+                <div className="prose prose-sm prose-neutral max-w-none prose-headings:tracking-tight prose-p:my-1.5 prose-pre:my-2 prose-pre:rounded-md prose-pre:bg-muted prose-pre:text-foreground prose-code:font-mono prose-code:text-[12px] prose-code:before:content-none prose-code:after:content-none prose-ul:my-1.5 prose-li:my-0">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                </div>
+              ) : (
+                m.content
+              )}
             </div>
           ))}
           <div ref={chatEnd} />
@@ -294,13 +447,16 @@ export default function Home() {
       {/* side panel */}
       <div className="flex min-w-0 flex-1 flex-col">
         <Tabs defaultValue="timeline" className="flex h-full flex-col gap-0">
-          <div className="border-b px-4 py-2">
+          <div className="px-4 py-2">
             <TabsList className="h-8">
               <TabsTrigger value="timeline" className="text-xs">
                 Timeline
               </TabsTrigger>
               <TabsTrigger value="memories" className="text-xs" onClick={refreshMemories}>
                 Memories ({mem.notes.length})
+              </TabsTrigger>
+              <TabsTrigger value="graph" className="text-xs" onClick={refreshMemories}>
+                Graph
               </TabsTrigger>
             </TabsList>
           </div>
@@ -359,6 +515,9 @@ export default function Home() {
                 );
               })}
             </div>
+          </TabsContent>
+          <TabsContent value="graph" className="flex-1 overflow-y-auto p-4">
+            <MemoryGraph notes={mem.notes} links={mem.links} />
           </TabsContent>
         </Tabs>
       </div>
