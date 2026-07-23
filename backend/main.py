@@ -1,22 +1,19 @@
-"""FastAPI backend: SSE chat endpoint that streams the full thinking process —
-memory retrieval, Claude's reasoning + answer, then the A-MEM write pipeline."""
-
 import json
 from typing import Iterator
 
 from dotenv import load_dotenv
 
-load_dotenv()  # reads backend/.env (ANTHROPIC_API_KEY) before the anthropic client is created
+load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 import agent
 from memory import MemoryStore
+from schemas import ChatRequest
 
-app = FastAPI(title="Long-Term Memory Retrieval using Zettelkasten")
+app = FastAPI(title="long-term memory retrieval using zettelkasten")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -27,10 +24,6 @@ app.add_middleware(
 store = MemoryStore()
 
 
-class ChatRequest(BaseModel):
-    messages: list[dict]  # [{role, content}, ...]
-
-
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
@@ -38,7 +31,6 @@ def sse(event: dict) -> str:
 def run_turn(messages: list[dict]) -> Iterator[str]:
     user_msg = messages[-1]["content"]
 
-    # --- 1. memory retrieval ---
     yield sse({"type": "stage", "name": "retrieval"})
     yield sse({"type": "memory_search", "query": user_msg, "method": "hybrid (vector + BM25, RRF)"})
     yield sse({"type": "embed", "model": "all-MiniLM-L6-v2", "dims": 384})
@@ -60,7 +52,6 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     if not memories:
         yield sse({"type": "memory_miss"})
 
-    # --- 2. answer with Claude (thinking + text streamed) ---
     yield sse({"type": "stage", "name": "answering"})
     assistant_text = []
     for ev in agent.chat_stream(messages, memories):
@@ -69,7 +60,6 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
         yield sse(ev)
     answer = "".join(assistant_text)
 
-    # --- 3. A-MEM write pipeline ---
     yield sse({"type": "stage", "name": "memorizing"})
     yield sse({"type": "extracting_facts", "model": agent.MEMORY_MODEL})
     try:
@@ -82,7 +72,6 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     for fact in facts:
         yield sse({"type": "fact_extracted", "fact": fact})
         try:
-            # Mem0-style write gate: dedupe/merge before creating anything
             candidates = store.hybrid_search(fact, k=4)
             decision = agent.decide_write(fact, candidates)
             yield sse({"type": "write_decision", "action": decision.action,
@@ -92,8 +81,8 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
                     store.touch([decision.target_note_id])
                 continue
             if decision.action == "update" and decision.target_note_id:
-                new_content = decision.merged_content or fact
-                store.evolve_note(decision.target_note_id, content=new_content)
+                store.evolve_note(decision.target_note_id,
+                                  content=decision.merged_content or fact)
                 updated = store.note_dict(store.get_note(decision.target_note_id))
                 yield sse({"type": "note_updated", "note": updated})
                 continue

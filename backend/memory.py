@@ -1,10 +1,3 @@
-"""A-MEM style memory store: SQLite + sqlite-vec (KNN) + FTS5 (BM25), hybrid via RRF.
-
-Each memory is a Zettelkasten-style "note" (arXiv 2502.12110): content plus
-LLM-generated keywords, tags, and a context sentence, with bidirectional links
-to related notes. Old notes can be retroactively evolved as new ones arrive.
-"""
-
 import json
 import sqlite3
 import time
@@ -70,8 +63,6 @@ class MemoryStore:
         )
         self.db.commit()
 
-    # ---------- write path ----------
-
     def add_note(self, content: str, context: str, keywords: list[str], tags: list[str]) -> int:
         now = time.time()
         cur = self.db.execute(
@@ -94,8 +85,6 @@ class MemoryStore:
 
     def evolve_note(self, note_id: int, content: str | None = None,
                     context: str | None = None, tags: list[str] | None = None):
-        """A-MEM memory evolution / Mem0-style UPDATE: rewrite a note in place
-        and re-sync its FTS and vector representations."""
         note = self.get_note(note_id)
         if note is None:
             return
@@ -127,8 +116,6 @@ class MemoryStore:
         )
         self.db.commit()
 
-    # ---------- read path ----------
-
     def get_note(self, note_id: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
 
@@ -149,7 +136,6 @@ class MemoryStore:
         return [(r["rowid"], r["distance"]) for r in rows]
 
     def bm25_search(self, query: str, k: int = 10) -> list[tuple[int, float]]:
-        # FTS5 MATCH syntax chokes on punctuation; keep alphanumeric tokens only
         tokens = [t for t in "".join(c if c.isalnum() else " " for c in query).split() if len(t) > 1]
         if not tokens:
             return []
@@ -165,8 +151,6 @@ class MemoryStore:
         return [(r["rowid"], r["score"]) for r in rows]
 
     def hybrid_search_traced(self, query: str, k: int = 6) -> tuple[list[dict], dict]:
-        """Like hybrid_search, but also returns the full computation trace:
-        raw ranker outputs and the per-note RRF arithmetic."""
         t0 = time.perf_counter()
         vec_hits = self.vector_search(query, k=k * 2)
         vec_ms = (time.perf_counter() - t0) * 1000
@@ -222,27 +206,10 @@ class MemoryStore:
         return results, trace
 
     def hybrid_search(self, query: str, k: int = 6) -> list[dict]:
-        """Reciprocal Rank Fusion of vector and BM25 rankings (k=60 constant)."""
-        vec_hits = self.vector_search(query, k=k * 2)
-        bm25_hits = self.bm25_search(query, k=k * 2)
-        scores: dict[int, float] = {}
-        sources: dict[int, list[str]] = {}
-        for rank, (rid, _) in enumerate(vec_hits):
-            scores[rid] = scores.get(rid, 0) + 1.0 / (60 + rank + 1)
-            sources.setdefault(rid, []).append("vector")
-        for rank, (rid, _) in enumerate(bm25_hits):
-            scores[rid] = scores.get(rid, 0) + 1.0 / (60 + rank + 1)
-            sources.setdefault(rid, []).append("bm25")
-        ranked = sorted(scores.items(), key=lambda x: -x[1])[:k]
-        results = []
-        for rid, score in ranked:
-            note = self.get_note(rid)
-            if note:
-                results.append({**self.note_dict(note), "score": round(score, 5), "sources": sources[rid]})
+        results, _ = self.hybrid_search_traced(query, k=k)
         return results
 
     def neighbors(self, note_id: int, k: int = 5) -> list[dict]:
-        """Nearest notes to an existing note (for link generation / evolution)."""
         row = self.db.execute(
             "SELECT embedding FROM notes_vec WHERE rowid = ?", (note_id,)
         ).fetchone()
@@ -261,7 +228,7 @@ class MemoryStore:
                 out.append({**self.note_dict(note), "distance": round(r["distance"], 4)})
         return out[:k]
 
-    def all_notes(self) -> list[dict]:
+    def all_notes(self) -> dict:
         notes = [self.note_dict(r) for r in self.db.execute("SELECT * FROM notes ORDER BY id DESC")]
         links = [dict(r) for r in self.db.execute("SELECT a, b, reason FROM links")]
         return {"notes": notes, "links": links}
