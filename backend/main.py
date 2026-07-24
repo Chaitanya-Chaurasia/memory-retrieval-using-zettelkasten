@@ -34,6 +34,8 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     yield sse({"type": "stage", "name": "retrieval"})
     yield sse({"type": "memory_search", "query": user_msg, "method": "hybrid (vector + BM25, RRF)"})
     yield sse({"type": "embed", "model": "all-MiniLM-L6-v2", "dims": 384})
+    # grab the 6 most relevant notes/nearest neighbors (vector + bm25, rrf-merged). memories go in the
+    # prompt so assistant can reference, trace is for the timeline.
     memories, trace = store.hybrid_search_traced(user_msg, k=6)
     yield sse({"type": "ranker_results", "ranker": "vector", **trace["vector"]})
     yield sse({"type": "ranker_results", "ranker": "bm25", **trace["bm25"]})

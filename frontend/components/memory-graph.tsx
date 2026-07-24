@@ -29,6 +29,7 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
     edges: [],
   });
   const [selected, setSelected] = useState<number | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
 
   useEffect(() => {
     if (notes.length === 0) {
@@ -50,7 +51,6 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
       .force("collide", forceCollide(26))
       .stop();
     sim.tick(300);
-    // after the simulation, d3 has resolved edge endpoints to node objects
     setLayout({ nodes, edges: edges as unknown as GraphEdge[] });
   }, [notes, links]);
 
@@ -73,25 +73,42 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full flex-1 rounded-lg border"
-        onClick={() => setSelected(null)}
+        onClick={() => {
+          setSelected(null);
+          setSelectedEdge(null);
+        }}
       >
         {layout.edges.map((e, i) => (
-          <line
-            key={i}
-            x1={e.source.x}
-            y1={e.source.y}
-            x2={e.target.x}
-            y2={e.target.y}
-            className={cn(
-              "stroke-border",
-              selected != null &&
-                (e.source.id === selected || e.target.id === selected) &&
-                "stroke-foreground"
-            )}
-            strokeWidth="1.2"
-          >
-            <title>{e.reason}</title>
-          </line>
+          <g key={i}>
+            <line
+              x1={e.source.x}
+              y1={e.source.y}
+              x2={e.target.x}
+              y2={e.target.y}
+              className={cn(
+                "stroke-border",
+                (selectedEdge === e ||
+                  (selected != null &&
+                    (e.source.id === selected || e.target.id === selected))) &&
+                  "stroke-foreground"
+              )}
+              strokeWidth="1.2"
+            />
+            <line
+              x1={e.source.x}
+              y1={e.source.y}
+              x2={e.target.x}
+              y2={e.target.y}
+              stroke="transparent"
+              strokeWidth="10"
+              className="cursor-pointer"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setSelected(null);
+                setSelectedEdge(selectedEdge === e ? null : e);
+              }}
+            />
+          </g>
         ))}
         {layout.nodes.map((n) => (
           <g
@@ -100,9 +117,11 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
             className="cursor-pointer"
             onClick={(ev) => {
               ev.stopPropagation();
+              setSelectedEdge(null);
               setSelected(n.id === selected ? null : n.id);
             }}
           >
+            <circle r={radius(n) + 6} fill="transparent" />
             <circle
               r={radius(n)}
               className={cn(
@@ -110,9 +129,7 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
                 n.id === selected ? "fill-foreground" : "fill-background"
               )}
               strokeWidth="1.3"
-            >
-              <title>{n.content}</title>
-            </circle>
+            />
             <text
               y={radius(n) + 11}
               textAnchor="middle"
@@ -124,7 +141,14 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
         ))}
       </svg>
 
-      {selectedNote ? (
+      {selectedEdge ? (
+        <div className="rounded-lg border p-3">
+          <span className="block font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+            link {selectedEdge.source.id} &harr; {selectedEdge.target.id}
+          </span>
+          <p className="mt-1 text-[13px]">{selectedEdge.reason || "(no reason recorded)"}</p>
+        </div>
+      ) : selectedNote ? (
         <div className="rounded-lg border p-3">
           <span className="block font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
             note {selectedNote.id} · recalled {selectedNote.access_count}&times;
@@ -141,7 +165,7 @@ export function MemoryGraph({ notes, links }: { notes: Note[]; links: NoteLink[]
         </div>
       ) : (
         <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-          node size = recall count · click a node for details · hover an edge for the link reason
+          node size = recall count · click a node or an edge for details
         </p>
       )}
     </div>
