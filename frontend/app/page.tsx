@@ -118,6 +118,34 @@ function RrfTable({ rows = [] }: { rows?: SSEEvent[] }) {
   );
 }
 
+function RerankTable({ rows = [] }: { rows?: SSEEvent[] }) {
+  const max = Math.max(...rows.map((r) => r.final), 1e-9);
+  return (
+    <Ev strong>
+      <Label>memorybank rerank · 0.75·rel + 0.25·e^(−age/S)</Label>
+      {rows.map((r) => (
+        <div
+          key={r.id}
+          className={cn(
+            "flex items-center gap-2 font-mono text-[11px]",
+            !r.selected && "opacity-40"
+          )}
+        >
+          <span className="w-8 shrink-0 text-right">n{r.id}</span>
+          <Bar frac={r.final / max} />
+          <span className="w-44 shrink-0">
+            rel={r.rel} mem={r.mem} → {r.final}
+          </span>
+          <span className="w-24 shrink-0">
+            {r.age_h}h · {r.recalls}×
+          </span>
+          <span className="truncate">{r.selected ? r.snippet : "cut"}</span>
+        </div>
+      ))}
+    </Ev>
+  );
+}
+
 function TimelineEvent({ ev }: { ev: SSEEvent }) {
   switch (ev.type) {
     case "stage":
@@ -137,7 +165,7 @@ function TimelineEvent({ ev }: { ev: SSEEvent }) {
       return (
         <Ev strong>
           <Label>
-            hit · note {ev.id} · rrf {ev.score} · {(ev.sources ?? []).join("+")}
+            hit · note {ev.id} · score {ev.score} · {(ev.sources ?? []).join("+")}
           </Label>
           <span className="font-medium text-foreground">{ev.content}</span>
           <div>{ev.context}</div>
@@ -162,6 +190,8 @@ function TimelineEvent({ ev }: { ev: SSEEvent }) {
       return <RankerResults ev={ev} />;
     case "rrf_table":
       return <RrfTable rows={ev.rows} />;
+    case "rerank_table":
+      return <RerankTable rows={ev.rows} />;
     case "extracting_facts":
       return (
         <Ev>

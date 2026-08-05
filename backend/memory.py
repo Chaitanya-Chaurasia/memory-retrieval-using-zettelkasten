@@ -1,4 +1,5 @@
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -9,6 +10,13 @@ from sentence_transformers import SentenceTransformer
 
 DB_PATH = Path(__file__).parent / "memory.db"
 EMBED_DIM = 384
+
+# memorybank rerank: final = W_REL*rel + W_MEM * e^(-age/stability). stability grows
+# with recalls (log-damped) so often-used memories fade slower. chat path only;
+# the write gate needs pure similarity or old duplicates slip past it.
+W_REL = 0.75
+W_MEM = 0.25
+S0_HOURS = 72.0
 
 _model = None
 
@@ -150,7 +158,8 @@ class MemoryStore:
             return []
         return [(r["rowid"], r["score"]) for r in rows]
 
-    def hybrid_search_traced(self, query: str, k: int = 6) -> tuple[list[dict], dict]:
+    def hybrid_search_traced(self, query: str, k: int = 6,
+                             rerank: bool = True) -> tuple[list[dict], dict]:
         t0 = time.perf_counter()
         vec_hits = self.vector_search(query, k=k * 2)
         vec_ms = (time.perf_counter() - t0) * 1000
@@ -178,8 +187,36 @@ class MemoryStore:
                 "total": round(vc + bc, 5),
             })
         fusion.sort(key=lambda r: -r["total"])
-        for i, row in enumerate(fusion):
-            row["selected"] = i < k
+
+        rerank_rows = []
+        if rerank and fusion:
+            now = time.time()
+            totals = [r["total"] for r in fusion]
+            lo, hi = min(totals), max(totals)
+            for r in fusion:
+                note = self.get_note(r["id"])
+                rel = 1.0 if hi == lo else (r["total"] - lo) / (hi - lo)
+                age_h = max(0.0, (now - max(note["last_accessed"], note["updated_at"])) / 3600)
+                stability = S0_HOURS * (1 + math.log1p(note["access_count"]))
+                mem = math.exp(-age_h / stability)
+                rerank_rows.append({
+                    "id": r["id"],
+                    "snippet": r["snippet"],
+                    "rel": round(rel, 4),
+                    "mem": round(mem, 4),
+                    "age_h": round(age_h, 1),
+                    "recalls": note["access_count"],
+                    "final": round(W_REL * rel + W_MEM * mem, 4),
+                })
+            rerank_rows.sort(key=lambda r: -r["final"])
+            picked = rerank_rows
+        else:
+            picked = fusion
+        selected_ids = [r["id"] for r in picked[:k]]
+        for row in fusion:
+            row["selected"] = row["id"] in selected_ids
+        for row in rerank_rows:
+            row["selected"] = row["id"] in selected_ids
 
         trace = {
             "vector": {
@@ -193,20 +230,22 @@ class MemoryStore:
                          for rid, s in bm25_hits],
             },
             "fusion": fusion,
+            "rerank": rerank_rows,
         }
+        by_id = {r["id"]: r for r in fusion}
         results = []
-        for row in fusion:
-            if not row["selected"]:
-                continue
+        for row in picked[:k]:
             note = self.get_note(row["id"])
             if note:
-                sources = (["vector"] if row["vec_rank"] is not None else []) + \
-                          (["bm25"] if row["bm25_rank"] is not None else [])
-                results.append({**self.note_dict(note), "score": row["total"], "sources": sources})
+                f = by_id[row["id"]]
+                sources = (["vector"] if f["vec_rank"] is not None else []) + \
+                          (["bm25"] if f["bm25_rank"] is not None else [])
+                score = row["final"] if "final" in row else row["total"]
+                results.append({**self.note_dict(note), "score": score, "sources": sources})
         return results, trace
 
     def hybrid_search(self, query: str, k: int = 6) -> list[dict]:
-        results, _ = self.hybrid_search_traced(query, k=k)
+        results, _ = self.hybrid_search_traced(query, k=k, rerank=False)
         return results
 
     def neighbors(self, note_id: int, k: int = 5) -> list[dict]:

@@ -30,9 +30,22 @@ front of a note graph.
 
 1. **retrieval.** your message is embedded locally (all-minilm-l6-v2, 384 dims, no api
    call) and searched two ways in one sqlite file: knn over sqlite-vec, and bm25 over
-   fts5. the two rankings get merged with reciprocal rank fusion, score = sum of
-   1/(60+rank). embeddings catch paraphrase ("my dog" finds rex), bm25 catches exact
-   names that embeddings blur. top 6 notes go into the system prompt.
+   fts5. the two rankings get merged with reciprocal rank fusion: each note scores the
+   sum of 1/(60+rank) over the rankers it appears in, so a note ranked well by both
+   beats a note ranked top by only one. embeddings catch paraphrase ("my dog" finds
+   rex), bm25 catches exact names that embeddings blur. fused candidates then get a
+   [memorybank](https://arxiv.org/abs/2305.10250)-style rescore:
+
+   ```
+   final = 0.75*rel + 0.25*e^(-age/S),  S = 72h * (1 + ln(1 + recalls))
+   ```
+
+   rel is the minmax-normalized rrf score, age is hours since the note was last
+   recalled or edited, and S is a stability that grows with recall count. so memories
+   you actually use fade slower, and a stales lose to a fresh and popular
+   note. the top 6 by final go into the system prompt. the write gate below skips this
+   rescore on purpose: it needs pure similarity, or old duplicates would fade out of
+   its candidate list and sneak back in as "new" facts.
 2. **answer.** claude sonnet 5 replies with those memories in context. its thinking
    stream and the answer tokens go straight to the timeline.
 3. **memorize.** haiku pulls durable facts out of the exchange. each fact hits the mem0

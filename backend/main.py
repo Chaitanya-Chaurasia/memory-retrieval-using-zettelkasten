@@ -41,6 +41,8 @@ def run_turn(messages: list[dict]) -> Iterator[str]:
     yield sse({"type": "ranker_results", "ranker": "bm25", **trace["bm25"]})
     if trace["fusion"]:
         yield sse({"type": "rrf_table", "rows": trace["fusion"]})
+    if trace["rerank"]:
+        yield sse({"type": "rerank_table", "rows": trace["rerank"]})
     store.touch([m["id"] for m in memories])
     for m in memories:
         yield sse({
