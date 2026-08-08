@@ -6,6 +6,9 @@ reasoning, write decisions) streams to the ui as it happens.
 
 **byok** (bring your own anthropic key).
 
+<img width="1396" height="534" alt="Screenshot 2026-08-07 at 6 55 39 PM" src="https://github.com/user-attachments/assets/f3e7eb35-3a9b-4c2d-a05a-37653683b1c1" />
+
+
 ## the idea
 
 llms forget everything between conversations. the usual fix is rag over raw chat logs,
